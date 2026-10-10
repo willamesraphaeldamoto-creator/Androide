@@ -1,0 +1,122 @@
+name: Temporary Android emulator in browser
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required secret
+        env:
+          WEB_PASSWORD: ${{ secrets.EMULATOR_WEB_PASSWORD }}
+        run: |
+          if [ -z "$WEB_PASSWORD" ]; then
+            echo "::error::Add the repository secret EMULATOR_WEB_PASSWORD before starting this workflow."
+            exit 1
+          fi
+          if [ "${#WEB_PASSWORD}" -lt 14 ]; then
+            echo "::error::EMULATOR_WEB_PASSWORD must contain at least 14 characters."
+            exit 1
+          fi
+          echo "::add-mask::$WEB_PASSWORD"
+
+      - name: Check virtualization support
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::This runner does not expose /dev/kvm, so the Android emulator may not run here."
+            exit 1
+          fi
+          ls -l /dev/kvm
+
+      - name: Start Android emulator
+        run: |
+          docker pull budtmo/docker-android:emulator_11.0
+          docker run -d --name android-emulator --restart=no \
+            --privileged --device /dev/kvm --shm-size=2g \
+            -p 6080:6080 \
+            -e EMULATOR_DEVICE="Samsung Galaxy S10" \
+            -e WEB_VNC=true \
+            budtmo/docker-android:emulator_11.0
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:6080/ >/dev/null; then
+              echo "Emulator web interface responded."
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' android-emulator 2>/dev/null)" != "true" ]; then
+              docker logs android-emulator || true
+              echo "::error::Android emulator container stopped during startup."
+              exit 1
+            fi
+            sleep 10
+          done
+          docker logs android-emulator || true
+          echo "::error::Timed out waiting for the emulator web interface."
+          exit 1
+
+      - name: Configure protected browser access
+        env:
+          WEB_PASSWORD: ${{ secrets.EMULATOR_WEB_PASSWORD }}
+        run: |
+          HASH=$(docker run --rm caddy:2 caddy hash-password --plaintext "$WEB_PASSWORD")
+          printf ':8080 {\n  basic_auth {\n    emulator %s\n  }\n  reverse_proxy host.docker.internal:6080\n}\n' "$HASH" > /tmp/Caddyfile
+          docker run -d --name emulator-proxy --restart=no \
+            --add-host=host.docker.internal:host-gateway \
+            -e PASSWORD_HASH="$HASH" \
+            -p 8080:8080 \
+            -v /tmp/Caddyfile:/etc/caddy/Caddyfile:ro \
+            caddy:2
+          for i in $(seq 1 20); do
+            if curl -s -o /dev/null http://127.0.0.1:8080/; then
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Open temporary secure tunnel
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080 > /tmp/cloudflared.log 2>&1 &
+          echo $! > /tmp/cloudflared.pid
+          for i in $(seq 1 60); do
+            URL=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
+            if [ -n "$URL" ]; then
+              echo "============================================================"
+              echo "TEMPORARY EMULATOR URL: $URL"
+              echo "LOGIN USER: emulator"
+              echo "LOGIN PASSWORD: the value you saved as repository secret EMULATOR_WEB_PASSWORD"
+              echo "This URL expires when this workflow stops."
+              echo "============================================================"
+              exit 0
+            fi
+            sleep 5
+          done
+          cat /tmp/cloudflared.log || true
+          echo "::error::Could not create the temporary tunnel."
+          exit 1
+
+      - name: Keep emulator online while this workflow is running
+        run: |
+          echo "The temporary browser link stays available only while this job runs (maximum 350 minutes)."
+          for i in $(seq 1 21000); do
+            if ! kill -0 "$(cat /tmp/cloudflared.pid)" 2>/dev/null; then
+              echo "::error::The tunnel stopped unexpectedly."
+              cat /tmp/cloudflared.log || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Stop containers
+        if: always()
+        run: |
+          docker logs android-emulator 2>/dev/null | tail -n 100 || true
+          docker rm -f emulator-proxy android-emulator 2>/dev/null || true
