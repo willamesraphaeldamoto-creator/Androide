@@ -1,0 +1,41 @@
+services:
+  android:
+    image: budtmo/docker-android:emulator_11.0
+    container_name: android-emulator
+    restart: unless-stopped
+    privileged: true
+    shm_size: "2gb"
+    environment:
+      EMULATOR_DEVICE: "Samsung Galaxy S10"
+      WEB_VNC: "true"
+    expose:
+      - "6080"
+    networks:
+      - private
+
+  caddy:
+    image: caddy:2
+    container_name: android-emulator-proxy
+    restart: unless-stopped
+    depends_on:
+      - android
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
+      LOGIN_USER: "${LOGIN_USER:?Set LOGIN_USER in .env}"
+      LOGIN_PASSWORD_HASH: "${LOGIN_PASSWORD_HASH:?Set LOGIN_PASSWORD_HASH in .env}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - private
+
+networks:
+  private:
+
+volumes:
+  caddy_data:
+  caddy_config:
