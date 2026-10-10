@@ -1,0 +1,36 @@
+name: Validate emulator deployment files
+
+on:
+  push:
+    paths:
+      - "docker-compose.yml"
+      - "Caddyfile"
+      - ".github/workflows/config-check.yml"
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - "Caddyfile"
+      - ".github/workflows/config-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate Compose configuration structure
+        run: |
+          python - <<'PY'
+          import yaml
+          with open("docker-compose.yml", encoding="utf-8") as f:
+              data = yaml.safe_load(f)
+          assert "android" in data.get("services", {})
+          assert "caddy" in data.get("services", {})
+          assert data["services"]["android"].get("privileged") is True
+          assert "6080" not in str(data["services"]["android"].get("ports", [])), "Do not expose emulator UI directly"
+          print("Compose YAML structure looks valid.")
+          PY
