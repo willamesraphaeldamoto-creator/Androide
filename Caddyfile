@@ -1,0 +1,7 @@
+{$DOMAIN} {
+    basic_auth {
+        {$LOGIN_USER} {$LOGIN_PASSWORD_HASH}
+    }
+
+    reverse_proxy android:6080
+}
